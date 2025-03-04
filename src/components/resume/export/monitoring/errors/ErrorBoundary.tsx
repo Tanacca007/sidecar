@@ -19,4 +19,4 @@ const ErrorBoundary = ({ children }) => {
   return children;
 };
 
-export { ErrorHandler, ErrorBoundary };
+export { ErrorBoundary };
