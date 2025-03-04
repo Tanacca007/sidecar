@@ -4,7 +4,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use color_eyre::owo_colors::OwoColorize;
 use colored::Colorize;
-use llm_client::broker::LLMBroker;
+use llm_client::{broker::LLMBroker, clients::types::LLMType};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -434,16 +434,21 @@ impl SessionService {
         )
         .set_context_crunching_llm(context_crunching_llm.clone());
 
-        session = session
-            .human_message_tool_use(
-                exchange_id.to_owned(),
-                user_message.to_owned(),
-                all_files,
-                open_files,
-                shell.to_owned(),
-                user_context.clone(),
-            )
-            .await;
+        // only when it is json mode that we switch the human message
+        if tool_agent.is_json_mode_and_eval() {
+            session = session.pr_description(exchange_id.to_owned(), user_message.to_owned());
+        } else {
+            session = session
+                .human_message_tool_use(
+                    exchange_id.to_owned(),
+                    user_message.to_owned(),
+                    all_files,
+                    open_files,
+                    shell.to_owned(),
+                    user_context.clone(),
+                )
+                .await;
+        }
         let _ = self
             .save_to_storage(&session, mcts_log_directory.clone())
             .await;
@@ -645,11 +650,13 @@ impl SessionService {
                     // if the input tokens are greater than 60k then do context crunching
                     // over here and lighten the context for the agent
                     // For custom LLMs, we use a higher token threshold
-                    let token_threshold = if message_properties.llm_properties().llm().is_custom() {
-                        120_000
-                    } else {
-                        60_000
-                    };
+                    let llm = message_properties.llm_properties().llm();
+                    let token_threshold =
+                        if llm.is_custom() || matches!(llm, &LLMType::ClaudeSonnet3_7) {
+                            150_000
+                        } else {
+                            60_000
+                        };
                     if input_tokens >= token_threshold {
                         println!("context_crunching");
                         // the right way to do this would be since the last reasoning node which was present here
@@ -672,8 +679,8 @@ impl SessionService {
 
                         let output = context_crunching_output.output_type();
                         match output {
-                            ToolUseAgentOutputType::Success((tool_input_partial, _thinking)) => {
-                                match tool_input_partial {
+                            ToolUseAgentOutputType::Success(tool_use_success) => {
+                                match tool_use_success.tool_parameters().clone() {
                                     ToolInputPartial::ContextCrunching(context_crunching) => {
                                         // add the context crunching to our action nodes
                                         session.add_action_node(
@@ -743,7 +750,7 @@ impl SessionService {
                 .await;
 
             match tool_use_output {
-                Ok(AgentToolUseOutput::Success((tool_input_partial, new_session))) => {
+                Ok(AgentToolUseOutput::Success((tool_input_partial, tool_use_id, new_session))) => {
                     // update our session
                     session = new_session;
                     // store to disk
@@ -757,6 +764,7 @@ impl SessionService {
                         .invoke_tool(
                             tool_type.clone(),
                             tool_input_partial,
+                            tool_use_id,
                             tool_box.clone(),
                             root_directory.to_owned(),
                             message_properties.clone(),
